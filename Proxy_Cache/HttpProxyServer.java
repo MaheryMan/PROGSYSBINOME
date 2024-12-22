@@ -7,6 +7,7 @@ import org.json.*;
 public class HttpProxyServer {
 
     private static String APACHE_URL;
+    private static int EXPIRATION_TIME; 
     private static int PORT;
     private static final ConcurrentHashMap<String, CacheEntry> cache = new ConcurrentHashMap<>();
     private static ServerSocket serverSocket;
@@ -23,7 +24,7 @@ public class HttpProxyServer {
         }
 
         boolean isExpired() {
-            return System.currentTimeMillis() - timestamp > 300000; // 5 minutes
+            return System.currentTimeMillis() - timestamp > EXPIRATION_TIME;
         }
     }
 
@@ -40,6 +41,7 @@ public class HttpProxyServer {
             JSONObject jsonObject = new JSONObject(jsonContent.toString());
             APACHE_URL = jsonObject.getString("url");
             PORT = jsonObject.getInt("port");
+            EXPIRATION_TIME = (int) (jsonObject.getInt("tempsExpiration") * 60000);
         }
     }
 
@@ -50,6 +52,9 @@ public class HttpProxyServer {
             System.err.println("Error loading config file: " + e.getMessage());
             return;
         }
+
+        // Démarrer le nettoyage périodique du cache
+        startCacheCleanupTask();
 
         serverSocket = new ServerSocket(PORT);
         System.out.println("Proxy server running on port " + PORT);
@@ -89,9 +94,30 @@ public class HttpProxyServer {
                 case "3":
                     stopServer();
                     scanner.close();
-                    return; // Exit the loop and stop the program
+                    return;
                 default:
                     System.out.println("Invalid choice. Please try again.");
+            }
+        }
+    }
+
+    private static void startCacheCleanupTask() {
+        Timer timer = new Timer(true);
+        timer.scheduleAtFixedRate(new TimerTask() {
+            @Override
+            public void run() {
+                cleanExpiredCache();
+            }
+        }, EXPIRATION_TIME, EXPIRATION_TIME);
+    }
+
+    private static void cleanExpiredCache() {
+        Iterator<Map.Entry<String, CacheEntry>> iterator = cache.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, CacheEntry> entry = iterator.next();
+            if (entry.getValue().isExpired()) {
+                iterator.remove();
+                System.out.println("Removed expired cache entry: " + entry.getKey());
             }
         }
     }
@@ -142,6 +168,10 @@ public class HttpProxyServer {
                 if (!cacheEntry.isExpired()) {
                     sendCachedResponse(outputStream, cacheEntry, version);
                     return;
+                } else {
+                    // Supprimer l'entrée expirée du cache
+                    cache.remove(cacheKey);
+                    System.out.println("Removed expired cache entry during request: " + cacheKey);
                 }
             }
 
@@ -179,11 +209,20 @@ public class HttpProxyServer {
 
                 if (responseCode == 200) {
                     cache.put(cacheKey, new CacheEntry(content.toString(), contentType));
+                    System.out.println("Added new cache entry: " + cacheKey);
                 }
+                if (responseCode == 404) {
+                    sendErrorResponse(outputStream, 404, "Not Found");
+                    return;
+                }
+
 
                 sendResponse(outputStream, responseCode, connection.getResponseMessage(), version, contentType, content.toString());
 
-            } catch (Exception e) {
+            }catch(FileNotFoundException e){
+                sendErrorResponse(outputStream, 404, "page non trouvee");
+            }
+             catch (Exception e) {
                 sendErrorResponse(outputStream, 502, "Bad Gateway");
             }
 
@@ -223,9 +262,17 @@ public class HttpProxyServer {
     }
 
     private static void listCachedPages() {
-        System.out.println("Cached pages:");
-        for (String key : cache.keySet()) {
-            System.out.println(key);
+        System.out.println("\nCached pages:");
+        if (cache.isEmpty()) {
+            System.out.println("No pages in cache.");
+            return;
+        }else{
+        for (Map.Entry<String, CacheEntry> entry : cache.entrySet()) {
+            long timeLeft = (EXPIRATION_TIME - (System.currentTimeMillis() - entry.getValue().timestamp)) / 1000;
+            if (timeLeft>0) {
+                System.out.printf("Key: %s (Expires in: %d seconds)%n", entry.getKey(), Math.max(0, timeLeft));
+            }
+        }
         }
     }
 
